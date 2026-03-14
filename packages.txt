@@ -3,3 +3,7 @@ libglib2.0-0
 libsm6
 libxext6
 ffmpeg
+libsrtp2-dev
+libopus-dev
+libvpx-dev
+pkg-config
