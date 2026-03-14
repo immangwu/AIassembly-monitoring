@@ -487,21 +487,35 @@ elif st.session_state.screen == "assembly":
 
         if not s["is_final"]:
 
-            # ── CAMERA CAPTURE ──────────────────────────
-            st.markdown('<span style="background:#1d4ed8;color:#fff;font-size:10px;'
-                        'font-weight:700;padding:2px 8px;border-radius:3px;letter-spacing:2px;">'
-                        '⬤ CAPTURE</span>'
-                        '<span style="color:#64748b;font-size:11px;margin-left:8px;">'
-                        'Take a photo — YOLO will annotate automatically</span>',
-                        unsafe_allow_html=True)
+            # ── INPUT TABS: Camera (PC/Phone) | Upload (Meta Quest) ──
+            tab_cam, tab_upload = st.tabs(["📷  Camera  (PC / Phone)", "📁  Upload Photo  (Meta Quest / VR)"])
 
-            cam_data = camera_xr(key=f"cam_stage_{st.session_state.stage}")
+            pil_img = None
 
-            if cam_data:
+            with tab_cam:
+                st.caption("Live camera — click capture when parts are ready.")
+                cam_data = camera_xr(key=f"cam_stage_{st.session_state.stage}")
+                if cam_data:
+                    header, b64 = cam_data.split(",", 1)
+                    pil_img = Image.open(io.BytesIO(base64.b64decode(b64)))
+
+            with tab_upload:
+                st.markdown(
+                    '<div style="background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.3);'
+                    'border-radius:6px;padding:8px 12px;font-size:11px;color:#f59e0b;margin-bottom:8px;">'
+                    '📌 <b>Meta Quest users:</b> Take a photo of the parts using the Quest camera app, '
+                    'then upload it here for YOLO analysis.'
+                    '</div>', unsafe_allow_html=True)
+                uploaded = st.file_uploader(
+                    "Upload a photo of the parts",
+                    type=["jpg", "jpeg", "png", "webp"],
+                    key=f"upload_stage_{st.session_state.stage}"
+                )
+                if uploaded:
+                    pil_img = Image.open(uploaded)
+
+            if pil_img:
                 t_start = time.time()
-                # Decode base64 data-URL → PIL image
-                header, b64 = cam_data.split(",", 1)
-                pil_img = Image.open(io.BytesIO(base64.b64decode(b64)))
                 annotated, detections, part_distances = annotate_frame(pil_img, st.session_state.stage)
                 missing, extra, correct, neutral = analyse(detections, st.session_state.stage)
                 st.session_state.annotated      = annotated
