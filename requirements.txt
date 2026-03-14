@@ -1,0 +1,9 @@
+ultralytics==8.3.0
+streamlit>=1.32.0
+streamlit-webrtc>=0.47.0
+av>=10.0.0
+Pillow>=10.0.0
+numpy>=1.24.0
+requests>=2.31.0
+torch>=2.0.0
+torchvision>=0.15.0
