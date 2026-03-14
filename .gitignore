@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.env
+venv/
+env/
+
+# Large driver files
+CP210x_Universal_Windows_Driver/
+CP210x_Universal_Windows_Driver.zip
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/
+
+# Training outputs (keep best.pt, ignore last.pt)
+last.pt
+runs/

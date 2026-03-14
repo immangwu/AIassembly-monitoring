@@ -1,0 +1,10 @@
+path: .
+train: images/Train
+val: images/Train
+
+names:
+  0: part 1
+  1: part 2
+  2: part 3
+  3: part 4
+  4: part 5
