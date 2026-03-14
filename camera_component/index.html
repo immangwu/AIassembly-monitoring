@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#0f1218; font-family:sans-serif; padding:4px; }
+  #video { width:100%; max-height:360px; object-fit:cover;
+           background:#000; border-radius:6px; display:block; }
+  #canvas { display:none; }
+  #status { color:#10b981; font-size:11px; padding:4px 2px;
+            letter-spacing:1px; font-weight:600; }
+  #err    { color:#ef4444; font-size:11px; padding:4px 2px; display:none; }
+  #btn    { width:100%; margin-top:6px; padding:11px;
+            background:#10b981; color:#fff; border:none;
+            border-radius:6px; font-size:13px; font-weight:700;
+            cursor:pointer; letter-spacing:1px; display:none; }
+  #btn:active { background:#059669; }
+  #snap   { width:100%; margin-top:4px; border-radius:6px;
+            display:none; max-height:240px; object-fit:contain; }
+  #ok     { color:#10b981; font-size:11px; padding:4px 2px;
+            display:none; font-weight:600; }
+</style>
+</head>
+<body>
+<video id="video" autoplay playsinline muted></video>
+<canvas id="canvas"></canvas>
+<div id="status">⏳ Requesting camera access...</div>
+<div id="err"></div>
+<button id="btn">📷  CAPTURE &amp; ANALYSE</button>
+<img id="snap" alt="Captured frame"/>
+<div id="ok">✓ Frame captured — running YOLO...</div>
+
+<script>
+  // ── Streamlit component protocol ───────────────────────
+  let _componentReady = false;
+
+  function sendToStreamlit(value) {
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:setComponentValue",
+      value: value,
+      dataType: "json"
+    }, "*");
+  }
+
+  function setHeight() {
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:setFrameHeight",
+      height: document.body.scrollHeight + 10
+    }, "*");
+  }
+
+  // Announce ready
+  function announceReady() {
+    window.parent.postMessage({
+      isStreamlitMessage: true,
+      type: "streamlit:componentReady",
+      apiVersion: 1
+    }, "*");
+  }
+
+  window.addEventListener("message", (e) => {
+    if (e.data && e.data.type === "streamlit:render") {
+      if (!_componentReady) { _componentReady = true; startCamera(); }
+    }
+  });
+
+  // ── Camera setup ───────────────────────────────────────
+  const video  = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
+  const btn    = document.getElementById("btn");
+  const status = document.getElementById("status");
+  const errDiv = document.getElementById("err");
+  const snap   = document.getElementById("snap");
+  const ok     = document.getElementById("ok");
+
+  // Try cameras in order: rear/passthrough → front → any
+  const CONSTRAINTS = [
+    { video: { facingMode: { ideal: "environment" }, width: { ideal: 640 }, height: { ideal: 480 } } },
+    { video: { facingMode: "environment" } },
+    { video: { facingMode: "user" } },
+    { video: true }
+  ];
+
+  async function startCamera() {
+    for (const c of CONSTRAINTS) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(c);
+        video.srcObject = stream;
+        await new Promise(r => video.onloadedmetadata = r);
+        video.play();
+        status.textContent = "⬤ LIVE  —  camera active";
+        btn.style.display = "block";
+        setHeight();
+        return;
+      } catch (e) { /* try next */ }
+    }
+    status.textContent = "";
+    errDiv.style.display = "block";
+    errDiv.textContent = "❌ Camera not available — check browser permissions.";
+    setHeight();
+  }
+
+  btn.onclick = () => {
+    const w = video.videoWidth  || 640;
+    const h = video.videoHeight || 480;
+    canvas.width  = w;
+    canvas.height = h;
+    canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+    snap.src = dataUrl;
+    snap.style.display = "block";
+    ok.style.display = "block";
+    status.textContent = "✓ Captured";
+    setHeight();
+
+    // Send base64 string back to Streamlit (strip the header)
+    sendToStreamlit(dataUrl);
+  };
+
+  // Start immediately — also fires once streamlit:render arrives
+  setTimeout(announceReady, 100);
+  // Fallback: start camera even without render message (some Streamlit versions)
+  setTimeout(() => { if (!_componentReady) { _componentReady=true; startCamera(); } }, 600);
+</script>
+</body>
+</html>

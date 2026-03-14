@@ -1,11 +1,22 @@
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image, ImageDraw
 import numpy as np
-import os, time
+import os, time, base64, io
 import requests
 import onnxruntime as ort
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Custom camera component — works on Meta Quest + standard browsers
+_camera_xr = components.declare_component(
+    "camera_xr",
+    path=os.path.join(BASE_DIR, "camera_component")
+)
+
+def camera_xr(key=None):
+    """Returns base64 JPEG data-URL string when user captures, else None."""
+    return _camera_xr(key=key, default=None)
 
 st.set_page_config(page_title="TANCAM Valve Assembly", page_icon="🔧", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -484,12 +495,13 @@ elif st.session_state.screen == "assembly":
                         'Take a photo — YOLO will annotate automatically</span>',
                         unsafe_allow_html=True)
 
-            cam_img = st.camera_input("Point camera at parts and click capture",
-                                      key=f"cam_stage_{st.session_state.stage}")
+            cam_data = camera_xr(key=f"cam_stage_{st.session_state.stage}")
 
-            if cam_img:
+            if cam_data:
                 t_start = time.time()
-                pil_img = Image.open(cam_img)
+                # Decode base64 data-URL → PIL image
+                header, b64 = cam_data.split(",", 1)
+                pil_img = Image.open(io.BytesIO(base64.b64decode(b64)))
                 annotated, detections, part_distances = annotate_frame(pil_img, st.session_state.stage)
                 missing, extra, correct, neutral = analyse(detections, st.session_state.stage)
                 st.session_state.annotated      = annotated
