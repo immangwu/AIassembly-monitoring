@@ -1,9 +1,9 @@
 import streamlit as st
-from ultralytics import YOLO
 from PIL import Image, ImageDraw
 import numpy as np
 import os, time
 import requests
+import onnxruntime as ort
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -11,14 +11,80 @@ st.set_page_config(page_title="TANCAM Valve Assembly", page_icon="🔧", layout=
                    initial_sidebar_state="collapsed")
 
 # ──────────────────────────────────────────────────────────
-# MODEL  (cached — loads once)
+# ONNX MODEL  (cached — loads once, no PyTorch needed)
 # ──────────────────────────────────────────────────────────
+INPUT_SIZE  = 640
+NUM_CLASSES = 5
+PART_NAMES  = {0: "part 1", 1: "part 2", 2: "part 3", 3: "part 4", 4: "part 5"}
+CONF_THRESH = 0.05
+IOU_THRESH  = 0.45
+
 @st.cache_resource
 def load_model():
-    return YOLO(os.path.join(BASE_DIR, "best .pt"))
+    opts = ort.SessionOptions()
+    opts.inter_op_num_threads = 2
+    opts.intra_op_num_threads = 2
+    return ort.InferenceSession(
+        os.path.join(BASE_DIR, "best.onnx"),
+        sess_options=opts,
+        providers=["CPUExecutionProvider"]
+    )
 
-model = load_model()
-PART_NAMES = {0: "part 1", 1: "part 2", 2: "part 3", 3: "part 4", 4: "part 5"}
+def _preprocess(pil_img):
+    orig_w, orig_h = pil_img.size
+    img = pil_img.convert("RGB").resize((INPUT_SIZE, INPUT_SIZE), Image.BILINEAR)
+    arr = np.array(img, dtype=np.float32) / 255.0
+    arr = arr.transpose(2, 0, 1)[np.newaxis]   # (1,3,640,640)
+    return arr, orig_w, orig_h
+
+def _nms(boxes, scores):
+    x1, y1, x2, y2 = boxes[:,0], boxes[:,1], boxes[:,2], boxes[:,3]
+    areas = (x2-x1)*(y2-y1)
+    order = scores.argsort()[::-1]
+    keep  = []
+    while order.size:
+        i = order[0]; keep.append(i)
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        iou = (np.maximum(0,xx2-xx1)*np.maximum(0,yy2-yy1)) / \
+              (areas[i]+areas[order[1:]]-np.maximum(0,xx2-xx1)*np.maximum(0,yy2-yy1)+1e-6)
+        order = order[1:][iou <= IOU_THRESH]
+    return keep
+
+def _infer(pil_img):
+    """Run ONNX inference. Returns list of {name, conf, x1,y1,x2,y2}."""
+    session = load_model()
+    inp, orig_w, orig_h = _preprocess(pil_img)
+    pred = session.run(None, {session.get_inputs()[0].name: inp})[0][0]  # (41,8400)
+    pred = pred.T                      # (8400,41)
+    boxes_xywh    = pred[:, :4]
+    class_scores  = pred[:, 4:4+NUM_CLASSES]
+    class_ids     = np.argmax(class_scores, axis=1)
+    confidences   = class_scores[np.arange(len(class_scores)), class_ids]
+    mask          = confidences >= CONF_THRESH
+    boxes_xywh, confidences, class_ids = boxes_xywh[mask], confidences[mask], class_ids[mask]
+    if len(boxes_xywh) == 0:
+        return []
+    # cx,cy,w,h → x1,y1,x2,y2 scaled to original image
+    bx = np.stack([
+        (boxes_xywh[:,0]-boxes_xywh[:,2]/2)/INPUT_SIZE*orig_w,
+        (boxes_xywh[:,1]-boxes_xywh[:,3]/2)/INPUT_SIZE*orig_h,
+        (boxes_xywh[:,0]+boxes_xywh[:,2]/2)/INPUT_SIZE*orig_w,
+        (boxes_xywh[:,1]+boxes_xywh[:,3]/2)/INPUT_SIZE*orig_h,
+    ], axis=1)
+    dets = []
+    for cls_id in range(NUM_CLASSES):
+        m = class_ids == cls_id
+        if not m.any(): continue
+        for k in _nms(bx[m], confidences[m]):
+            b = bx[m][k]
+            dets.append({"cls": cls_id, "name": PART_NAMES[cls_id],
+                         "conf": float(confidences[m][k]),
+                         "x1": int(b[0]), "y1": int(b[1]),
+                         "x2": int(b[2]), "y2": int(b[3])})
+    return dets
 
 # ──────────────────────────────────────────────────────────
 # STAGE DATA
@@ -251,8 +317,7 @@ def annotate_frame(pil_img: Image.Image, stage_idx: int):
     Annotate PIL image with YOLO boxes + inter-part distance lines.
     Returns (annotated PIL, detections list, part_distances list).
     """
-    arr = np.array(pil_img.convert("RGB"))
-    results = model(arr, conf=0.05, verbose=False)
+    raw_dets = _infer(pil_img)
 
     img_out = pil_img.convert("RGB").copy()
     draw    = ImageDraw.Draw(img_out)
@@ -260,42 +325,39 @@ def annotate_frame(pil_img: Image.Image, stage_idx: int):
     detections = []
     centers    = {}   # name → (cx, cy)
 
-    for r in results:
-        for box in r.boxes:
-            cls   = int(box.cls)
-            name  = PART_NAMES.get(cls, f"part {cls+1}")
-            conf  = float(box.conf)
-            x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
+    for det in raw_dets:
+        name  = det["name"]
+        conf  = det["conf"]
+        x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
 
-            needed = name in stage["need"]
-            wrong  = name in stage["wrong"]
-            color  = (239,68,68) if wrong else (16,185,129) if needed else (245,158,11)
+        needed = name in stage["need"]
+        wrong  = name in stage["wrong"]
+        color  = (239,68,68) if wrong else (16,185,129) if needed else (245,158,11)
 
-            for th in range(3):
-                draw.rectangle([x1-th, y1-th, x2+th, y2+th], outline=color, width=1)
+        for th in range(3):
+            draw.rectangle([x1-th, y1-th, x2+th, y2+th], outline=color, width=1)
 
-            cs = 16
-            for (ccx, ccy, ddx, ddy) in [(x1,y1,1,1),(x2,y1,-1,1),(x1,y2,1,-1),(x2,y2,-1,-1)]:
-                draw.line([(ccx,ccy),(ccx+ddx*cs,ccy)], fill=color, width=3)
-                draw.line([(ccx,ccy),(ccx,ccy+ddy*cs)], fill=color, width=3)
+        cs = 16
+        for (ccx, ccy, ddx, ddy) in [(x1,y1,1,1),(x2,y1,-1,1),(x1,y2,1,-1),(x2,y2,-1,-1)]:
+            draw.line([(ccx,ccy),(ccx+ddx*cs,ccy)], fill=color, width=3)
+            draw.line([(ccx,ccy),(ccx,ccy+ddy*cs)], fill=color, width=3)
 
-            icon  = "✗" if wrong else "✓"
-            label = f"{icon} {name.upper()}  {round(conf*100)}%"
-            tw    = len(label) * 7
-            ly    = y1 - 20 if y1 > 24 else y2 + 4
-            draw.rectangle([x1, ly, x1+tw+8, ly+18], fill=color)
-            draw.text((x1+4, ly+2), label, fill=(0,0,0))
+        icon  = "✗" if wrong else "✓"
+        label = f"{icon} {name.upper()}  {round(conf*100)}%"
+        tw    = len(label) * 7
+        ly    = y1 - 20 if y1 > 24 else y2 + 4
+        draw.rectangle([x1, ly, x1+tw+8, ly+18], fill=color)
+        draw.text((x1+4, ly+2), label, fill=(0,0,0))
 
-            bcx, bcy = (x1+x2)//2, (y1+y2)//2
-            # Draw small crosshair at centre
-            draw.line([(bcx-6, bcy), (bcx+6, bcy)], fill=color, width=2)
-            draw.line([(bcx, bcy-6), (bcx, bcy+6)], fill=color, width=2)
+        bcx, bcy = (x1+x2)//2, (y1+y2)//2
+        draw.line([(bcx-6, bcy), (bcx+6, bcy)], fill=color, width=2)
+        draw.line([(bcx, bcy-6), (bcx, bcy+6)], fill=color, width=2)
 
-            centers[name] = (bcx, bcy)
-            detections.append({"name": name, "conf": conf,
-                                "needed": needed, "wrong": wrong,
-                                "cx": bcx, "cy": bcy,
-                                "x1": x1, "y1": y1, "x2": x2, "y2": y2})
+        centers[name] = (bcx, bcy)
+        detections.append({"name": name, "conf": conf,
+                            "needed": needed, "wrong": wrong,
+                            "cx": bcx, "cy": bcy,
+                            "x1": x1, "y1": y1, "x2": x2, "y2": y2})
 
     # ── Draw distance lines between every detected pair ──────
     part_distances = []
