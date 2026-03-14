@@ -3,8 +3,6 @@ torch
 torchvision
 ultralytics
 streamlit
-streamlit-webrtc
-av
 Pillow
 numpy
 requests

@@ -2,10 +2,8 @@ import streamlit as st
 from ultralytics import YOLO
 from PIL import Image, ImageDraw
 import numpy as np
-import os, time, threading
-import av
+import os, time
 import requests
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration, WebRtcMode
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -343,47 +341,6 @@ def analyse(detections, stage_idx):
     return missing, extra, correct, neutral
 
 
-# ──────────────────────────────────────────────────────────
-# LIVE VIDEO PROCESSOR  (runs in WebRTC thread)
-# ──────────────────────────────────────────────────────────
-class YOLOVideoProcessor(VideoProcessorBase):
-    def __init__(self):
-        self.stage_idx      = 0
-        self.lock           = threading.Lock()
-        self._detections    = []
-        self._part_distances = []
-        self._snap_bgr      = None
-
-    def set_stage(self, idx: int):
-        with self.lock:
-            self.stage_idx = idx
-
-    def get_snapshot(self):
-        with self.lock:
-            return list(self._detections), list(self._part_distances), self._snap_bgr
-
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img_bgr = frame.to_ndarray(format="bgr24")
-        with self.lock:
-            stage_idx = self.stage_idx
-
-        img_rgb  = img_bgr[:, :, ::-1].copy()
-        pil_img  = Image.fromarray(img_rgb)
-        annotated, detections, part_distances = annotate_frame(pil_img, stage_idx)
-        out_bgr  = np.array(annotated)[:, :, ::-1]
-
-        with self.lock:
-            self._detections     = detections
-            self._part_distances = part_distances
-            self._snap_bgr       = img_bgr.copy()
-
-        return av.VideoFrame.from_ndarray(out_bgr, format="bgr24")
-
-
-# WebRTC STUN config (works on local network too)
-RTC_CONFIG = RTCConfiguration(
-    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
-)
 
 
 # ══════════════════════════════════════════════════════════
@@ -457,52 +414,31 @@ elif st.session_state.screen == "assembly":
 
         if not s["is_final"]:
 
-            # ── LIVE WEBRTC STREAM ──────────────────────
-            st.markdown('<span class="live-badge">⬤ LIVE</span>'
+            # ── CAMERA CAPTURE ──────────────────────────
+            st.markdown('<span style="background:#1d4ed8;color:#fff;font-size:10px;'
+                        'font-weight:700;padding:2px 8px;border-radius:3px;letter-spacing:2px;">'
+                        '⬤ CAPTURE</span>'
                         '<span style="color:#64748b;font-size:11px;margin-left:8px;">'
-                        'YOLO annotating every frame in real-time</span>',
+                        'Take a photo — YOLO will annotate automatically</span>',
                         unsafe_allow_html=True)
 
-            ctx = webrtc_streamer(
-                key=f"yolo_live_stage_{st.session_state.stage}",
-                mode=WebRtcMode.SENDRECV,
-                rtc_configuration=RTC_CONFIG,
-                video_processor_factory=YOLOVideoProcessor,
-                media_stream_constraints={"video": True, "audio": False},
-                async_processing=True,
-            )
+            cam_img = st.camera_input("Point camera at parts and click capture",
+                                      key=f"cam_stage_{st.session_state.stage}")
 
-            # Push current stage index into processor
-            if ctx.video_processor:
-                ctx.video_processor.set_stage(st.session_state.stage)
-
-            # ── VERIFY button ──────────────────────────
-            st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
-            if st.button("✅  Verify Stage — check current frame",
-                         use_container_width=True, type="primary",
-                         disabled=(ctx.video_processor is None)):
-
-                if ctx.video_processor:
-                    t_start = time.time()
-                    detections, part_distances, snap_bgr = ctx.video_processor.get_snapshot()
-
-                    if snap_bgr is not None:
-                        pil_snap = Image.fromarray(snap_bgr[:, :, ::-1])
-                        annotated, _, snap_dists = annotate_frame(pil_snap, st.session_state.stage)
-                        st.session_state.annotated      = annotated
-                        st.session_state.part_distances = snap_dists
-                    else:
-                        st.session_state.annotated      = None
-                        st.session_state.part_distances = part_distances
-
-                    missing, extra, correct, neutral = analyse(detections, st.session_state.stage)
-                    st.session_state.resp_time  = round(time.time() - t_start, 3)
-                    st.session_state.det_result = dict(
-                        missing=missing, extra=extra,
-                        correct=correct, neutral=neutral,
-                        detections=detections
-                    )
-                    st.session_state.stage_ok = (not missing and not extra and bool(correct))
+            if cam_img:
+                t_start = time.time()
+                pil_img = Image.open(cam_img)
+                annotated, detections, part_distances = annotate_frame(pil_img, st.session_state.stage)
+                missing, extra, correct, neutral = analyse(detections, st.session_state.stage)
+                st.session_state.annotated      = annotated
+                st.session_state.part_distances = part_distances
+                st.session_state.resp_time      = round(time.time() - t_start, 3)
+                st.session_state.det_result     = dict(
+                    missing=missing, extra=extra,
+                    correct=correct, neutral=neutral,
+                    detections=detections
+                )
+                st.session_state.stage_ok = (not missing and not extra and bool(correct))
 
             # Show snapshot after verify
             if st.session_state.annotated:
